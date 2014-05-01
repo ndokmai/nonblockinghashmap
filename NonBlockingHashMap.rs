@@ -138,12 +138,36 @@ impl<K,V> KVs<K,V>{
 				 },
 		}	
 	}	
+
+	fn key_nonatomic(&self, idx: uint) -> *mut KV<K> {
+		self._ks[idx].load(SeqCst)	
+	}
+
+	fn value_nonatomic(&self, idx: uint) -> *mut KV<V> {
+		self._vs[idx].load(SeqCst)	
+	}
+
+
 }
 
 impl<K,V> Container for KVs<K,V> {
 	fn len(&self) -> uint {
 		self._ks.len()
 	}
+}
+
+#[unsafe_destructor]
+impl<K,V> Drop for KVs<K,V> {
+	fn drop(&mut self) {
+		for i in range(0, self._ks.len()){
+			unsafe{
+				let _: ~KV<K> = transmute(self._ks[i].load(SeqCst));
+				let _: ~KV<V> = transmute(self._vs[i].load(SeqCst));
+
+			}
+		}
+	}
+
 }
 
 // ---Structure for resizing -------------------------------------------------------
@@ -161,6 +185,15 @@ impl<K,V> CHM<K,V> {
 	}
 }
 
+#[unsafe_destructor]
+impl<K,V> Drop for CHM<K,V> {
+	fn drop(&mut self) {
+		if self._newkvs.load(SeqCst) as int !=0{
+			let _: ~KVs<K,V> = unsafe {transmute(self._newkvs.load(SeqCst))};
+		}
+	}
+}
+
 // ---Hash Map --------------------------------------------------------------------
 pub struct NonBlockingHashMap<K,V> {
 	_kvs: AtomicPtr<KVs<K,V>>,
@@ -168,7 +201,7 @@ pub struct NonBlockingHashMap<K,V> {
 	_last_resize: Timespec, 
 }
 
-impl<K,V> NonBlockingHashMap<K,V> {
+impl<K: Eq,V: Eq> NonBlockingHashMap<K,V> {
 
 	pub fn new() -> NonBlockingHashMap<K,V> {
 		NonBlockingHashMap::new_with_size(MIN_SIZE)
@@ -246,6 +279,30 @@ impl<K,V> NonBlockingHashMap<K,V> {
 				newkvs = (*kvs)._chm._newkvs.load(SeqCst);
 			}
 			return newkvs;
+		}
+	}
+
+	#[allow(unused_variable)]
+	fn put_if_match(&self, kvs: *mut KVs<K,V>, key: KV<K>, putval: KV<V>, expval: Option<KV<V>>) -> KV<V> {
+		let k: V = unsafe {transmute(0)};
+		return KV::<V>::new(k);
+	}
+
+	#[allow(unused_variable)]
+	fn copy_slot(&self, idx: uint, oldkvs: *mut KVs<K,V>, newkvs: *mut KVs<K,V>){
+		unsafe {
+			let tombstone: *mut KV<K> = transmute(~KV::<K>::new_tombstone());
+			let empty = KV::<K>::new_empty();
+			let mut oldkey = (*oldkvs).key_nonatomic(idx);
+			while *oldkey == empty{
+				(*oldkvs)._ks[idx].compare_and_swap(oldkey, tombstone, SeqCst);
+				oldkey = (*oldkvs).key_nonatomic(idx);
+			}
+
+			let oldvalue = (*oldkvs).value_nonatomic(idx);
+			while !(*oldvalue).is_prime(){
+				
+			}
 		}
 	}
 
