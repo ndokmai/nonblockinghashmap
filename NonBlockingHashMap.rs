@@ -20,72 +20,48 @@ static REPROBE_LIMIT: uint = 10;
 static MIN_SIZE_LOG: uint = 3;
 static MIN_SIZE: uint = 1<<MIN_SIZE_LOG;
 
-
 // ---Key-or-Value Slot Type--------------------------------------------------------------------------------
+
 #[deriving(Eq)]
-enum KVTypes{
-	KV = 1,
-	TombStone = 2,
-	Empty = 3,
+enum KeyTypes{
+	Key = 1,
+	KeyTombStone = 2,
+	KeyEmpty = 3,
 }
 
-struct KV<T> {
-	_kvtype: KVTypes,
-	_kv: *mut T,
-	_is_prime: bool
+struct Key<T> {
+	_keytype: KeyTypes,
+	_key: *mut T,
 }
 
-impl<T: Hash> KV<T> {
-	fn new(kv: T) -> KV<T> {
-		KV { _kvtype: KV, _kv: unsafe{ transmute(~kv) }, _is_prime: false }
-	}
-	
-	fn new_empty() -> KV<T> {
-		KV { _kvtype: Empty, _kv: unsafe{ transmute(0 as *mut T) }, _is_prime: false }
+impl<T: Hash> Key<T> {
+	fn new(k: T) -> Key<T> {
+		Key { _keytype: Key, _key: unsafe{ transmute(~k) } }
 	}
 
-	fn new_tombstone() -> KV<T> {
-		KV { _kvtype: TombStone, _kv: unsafe{ transmute(0 as *mut T) }, _is_prime: false }
+	fn new_empty() -> Key<T> {
+		Key { _keytype: KeyEmpty, _key: unsafe{ transmute(0) } }
 	}
 
-	fn new_tombprime() -> KV<T>{
-		KV { _kvtype: TombStone, _kv: unsafe{ transmute(0 as *mut T) }, _is_prime: true }
-	}
-
-	fn new_prime(kv: T) -> KV<T>{
-		KV { _kvtype: KV, _kv: unsafe{ transmute(~kv) }, _is_prime: true }
+	fn new_tombstone() -> Key<T> {
+		Key { _keytype: KeyTombStone, _key: unsafe{ transmute(0) } }
 	}
 
 	fn is_empty(&self) -> bool {
-		self._kvtype==Empty
+		self._keytype==KeyEmpty
 	}
 
-	fn is_prime(&self) -> bool {
-		self._is_prime	
+	fn keytype(&self) -> KeyTypes{
+		self._keytype
 	}
 
-	fn prime(&self) -> *mut KV<T>{
-		unsafe {
-			transmute(~KV { _kvtype: self._kvtype, _kv: self._kv, _is_prime: true })
-		}
+	fn get_key(&self) -> *mut T {
+		self._key
 	}
 
-	fn unprime(&self) -> *mut KV<T>{
-		unsafe {
-			transmute(~KV { _kvtype: self._kvtype, _kv: self._kv, _is_prime: false })
-		}
-	}
-
-	fn kvtype(&self) -> KVTypes {
-		self._kvtype
-	}
-
-	fn get_kv(&self) -> *mut T {
-		self._kv
-	}
 	// ---Hash Function--------------------------------------------------------------------------------------
 	fn hash(&self) -> u64 {
-		let mut h = hash::hash(&self._kv);	
+		let mut h = hash::hash(&self._key);	
 		h += (h << 15) ^ 0xffffcd7d;
 		h ^= h >> 10;
 		h += h << 3;
@@ -95,20 +71,109 @@ impl<T: Hash> KV<T> {
 	}
 }
 
+impl<T: Hash> Hash for Key<T>{
+	fn hash(&self, state: &mut SipState){
+		unsafe {(*self._key).hash(state)};
+	}
+}
+
 #[unsafe_destructor]
-impl<T> Drop for KV<T> {
+impl<T> Drop for Key<T> {
 	fn drop(&mut self){
 		unsafe {
-			let _: ~T = transmute(self._kv);
+			let _: ~T = transmute(self._key);
 		}
 	}
 }
 
-impl<T: Eq> Eq for KV<T>{
-	fn eq(&self, other: &KV<T>) -> bool{
-		(self._kvtype==Empty && other._kvtype==Empty) ||
-			(self._kvtype==TombStone && other._kvtype==TombStone && self._is_prime==other._is_prime) ||
-			(( self._kv==other._kv || unsafe {(*self._kv)==(*other._kv)} ) && self._is_prime==other._is_prime)
+impl<T: Eq> Eq for Key<T>{
+	fn eq(&self, other: &Key<T>) -> bool{
+		self._keytype==KeyEmpty && other._keytype==KeyEmpty ||
+			self._keytype==KeyTombStone && other._keytype==KeyTombStone ||
+			self._key==other._key || 
+			unsafe {(*self._key)==(*other._key)}  
+	}	
+}
+
+#[deriving(Eq)]
+enum ValueTypes{
+	Value = 1,
+	ValueTombStone = 2,
+	ValueEmpty = 3,
+}
+
+struct Value<T> {
+	_valuetype: ValueTypes,
+	_value: *mut T,
+	_is_prime: bool
+}
+
+impl<T> Value<T> {
+	fn new(v: T) -> Value<T> {
+		Value { _valuetype: Value, _value: unsafe{ transmute(~v) }, _is_prime: false }
+	}
+
+	fn new_empty() -> Value<T> {
+		Value { _valuetype: ValueEmpty, _value: unsafe{ transmute(0) }, _is_prime: false }
+	}
+
+	fn new_tombstone() -> Value<T> {
+		Value { _valuetype: ValueTombStone, _value: unsafe{ transmute(0) }, _is_prime: false }
+	}
+
+	fn new_tombprime() -> Value<T> {
+		Value { _valuetype: ValueTombStone, _value: unsafe{ transmute(0) }, _is_prime: true }
+	}
+
+	fn new_prime(v: T) -> Value<T> {
+		Value { _valuetype: Value, _value: unsafe{ transmute(~v) }, _is_prime: true }
+	}
+
+	fn is_empty(&self) -> bool {
+		self._valuetype==ValueEmpty
+	}
+
+	fn is_prime(&self) -> bool {
+		self._is_prime	
+	}
+
+	fn prime(&self) -> *mut Value<T>{
+		assert!(!self.is_prime());
+		unsafe {
+			transmute(~Value { _valuetype: self._valuetype, _value: self._value, _is_prime: true })
+		}
+	}
+
+	fn unprime(&self) -> *mut Value<T>{
+		assert!(self.is_prime());
+		unsafe {
+			transmute(~Value { _valuetype: self._valuetype, _value: self._value, _is_prime: false })
+		}
+	}
+
+	fn valuetype(&self) -> ValueTypes {
+		self._valuetype
+	}
+
+	fn get_value(&self) -> *mut T {
+		self._value
+	}
+}
+
+#[unsafe_destructor]
+impl<T> Drop for Value<T> {
+	fn drop(&mut self){
+		unsafe {
+			let _: ~T = transmute(self._value);
+		}
+	}
+}
+
+impl<T: Eq> Eq for Value<T>{
+	fn eq(&self, other: &Value<T>) -> bool{
+		(self._valuetype==ValueEmpty && other._valuetype==ValueEmpty) ||
+			(self._valuetype==ValueTombStone && other._valuetype==ValueTombStone && self._is_prime==other._is_prime) ||
+			(( self._value==other._value || unsafe {(*self._value)==(*other._value)} ) && self._is_prime==other._is_prime)
 	}	
 }
 
@@ -116,8 +181,8 @@ impl<T: Eq> Eq for KV<T>{
 // ---Hash Table Layer Node -------------------------------------------------------------------------------
 
 struct KVs<K,V> {
-	_ks: ~[AtomicPtr<KV<K>>],
-	_vs: ~[AtomicPtr<KV<V>>],
+	_ks: ~[AtomicPtr<Key<K>>],
+	_vs: ~[AtomicPtr<Value<V>>],
 	_chm: CHM<K,V>,
 	_hashes: ~[u64]
 }
@@ -126,16 +191,16 @@ impl<K: Hash,V: Hash> KVs<K,V>{
 	fn new(table_size: uint) -> KVs<K,V>{
 		KVs {
 			_ks: {
-					 let mut temp:  ~[AtomicPtr<KV<K>>] = ~[];
+					 let mut temp:  ~[AtomicPtr<Key<K>>] = ~[];
 					 for _ in range(0, table_size) {
-						temp.push(AtomicPtr::new( unsafe {transmute(~KV::<K>::new_empty())} ));
+						temp.push(AtomicPtr::new( unsafe {transmute(~Key::<K>::new_empty())} ));
 					 }
 					 temp
 				 },
 			_vs: {
-					 let mut temp:  ~[AtomicPtr<KV<V>>] = ~[];
+					 let mut temp:  ~[AtomicPtr<Value<V>>] = ~[];
 					 for _ in range(0, table_size) {
-						temp.push(AtomicPtr::new( unsafe {transmute(~KV::<V>::new_tombstone())} ));
+						temp.push(AtomicPtr::new( unsafe {transmute(~Value::<V>::new_tombstone())} ));
 					 }
 					 temp
 				 },
@@ -150,15 +215,13 @@ impl<K: Hash,V: Hash> KVs<K,V>{
 		}	
 	}	
 
-	fn key_nonatomic(&self, idx: uint) -> *mut KV<K> {
+	fn key_nonatomic(&self, idx: uint) -> *mut Key<K> {
 		self._ks[idx].load(SeqCst)	
 	}
 
-	fn value_nonatomic(&self, idx: uint) -> *mut KV<V> {
+	fn value_nonatomic(&self, idx: uint) -> *mut Value<V> {
 		self._vs[idx].load(SeqCst)	
 	}
-
-
 }
 
 impl<K,V> Container for KVs<K,V> {
@@ -172,8 +235,8 @@ impl<K,V> Drop for KVs<K,V> {
 	fn drop(&mut self) {
 		for i in range(0, self._ks.len()){
 			unsafe{
-				let _: ~KV<K> = transmute(self._ks[i].load(SeqCst));
-				let _: ~KV<V> = transmute(self._vs[i].load(SeqCst));
+				let _: ~Key<K> = transmute(self._ks[i].load(SeqCst));
+				let _: ~Value<V> = transmute(self._vs[i].load(SeqCst));
 
 			}
 		}
@@ -298,7 +361,7 @@ impl<K: Eq + Hash,V: Eq + Hash> NonBlockingHashMap<K,V> {
 	}
 
 	#[allow(unused_variable)]
-	fn put_if_match(&self, kvs: *mut KVs<K,V>, key: *mut KV<K>, putval: *mut KV<V>, expval: Option<KV<V>>) -> KV<V> {
+	fn put_if_match(&self, kvs: *mut KVs<K,V>, key: *mut Key<K>, putval: *mut Value<V>, expval: Option<Value<V>>) -> Value<V> {
 		unsafe {
 			assert!(!(*putval).is_empty());
 			assert!(!(*putval).is_prime());
@@ -315,7 +378,7 @@ impl<K: Eq + Hash,V: Eq + Hash> NonBlockingHashMap<K,V> {
 			let v = (*kvs).value_nonatomic(idx);
 
 			let k: V = transmute(0);
-			return KV::<V>::new(k);
+			return Value::<V>::new(k);
 
 		}
 	}
@@ -416,8 +479,8 @@ impl<K: Eq + Hash,V: Eq + Hash> NonBlockingHashMap<K,V> {
 	fn copy_slot(&self, idx: uint, oldkvs: *mut KVs<K,V>) -> bool{
 		unsafe {
 			let mut key = (*oldkvs).key_nonatomic(idx);
-			let empty = KV::<K>::new_empty();
-			let tombstone_ptr: *mut KV<K> = transmute(~KV::<K>::new_tombstone());
+			let empty = Key::<K>::new_empty();
+			let tombstone_ptr: *mut Key<K> = transmute(~Key::<K>::new_tombstone());
 			while *key == empty{
 				(*oldkvs)._ks[idx].compare_and_swap(key, tombstone_ptr, SeqCst);
 				key = (*oldkvs).key_nonatomic(idx);
@@ -427,22 +490,22 @@ impl<K: Eq + Hash,V: Eq + Hash> NonBlockingHashMap<K,V> {
 			while !(*oldvalue).is_prime(){
 				let primed = (*oldvalue).prime();	
 				if (*oldkvs)._vs[idx].compare_and_swap(oldvalue, primed, SeqCst)==oldvalue {
-					if (*oldvalue).kvtype()==TombStone { return true } 
+					if (*oldvalue).valuetype()==ValueTombStone { return true } 
 					oldvalue = primed;
 					break;
 				}
 				oldvalue = (*oldkvs).value_nonatomic(idx);
 			}
-			let tombprime = KV::<V>::new_tombprime();
+			let tombprime = Value::<V>::new_tombprime();
 			if (*oldvalue) == tombprime { return false }	
 			
 			let old_unprimed = (*oldvalue).unprime();
 			assert!((*old_unprimed)!=tombprime);
 
-			let tombstone = KV::<V>::new_tombstone();
+			let tombstone = Value::<V>::new_tombstone();
 			let newkvs = (*oldkvs)._chm.newkvs_nonatomic();
-			let copied_into_new: bool = self.put_if_match(newkvs, key, old_unprimed, Some(KV::<V>::new_tombstone()))==tombstone;
-			let tombprime_ptr: *mut KV<V> = transmute(~KV::<V>::new_tombprime());
+			let copied_into_new: bool = self.put_if_match(newkvs, key, old_unprimed, Some(Value::<V>::new_tombstone()))==tombstone;
+			let tombprime_ptr: *mut Value<V> = transmute(~Value::<V>::new_tombprime());
 			while (*oldkvs)._vs[idx].compare_and_swap(oldvalue, tombprime_ptr, SeqCst)!=oldvalue{
 				oldvalue = (*oldkvs).value_nonatomic(idx);	
 			}
@@ -469,22 +532,22 @@ impl<K,V> Container for NonBlockingHashMap<K,V>{
  ****************************************************************************/
 #[cfg(test)]
 mod test {
-	use super::{KV, KVs, CHM, NonBlockingHashMap, Empty, TombStone};
+	use super::{Key, Value, KVs, CHM, NonBlockingHashMap, KeyEmpty, ValueTombStone};
 	use std::sync::atomics::{AtomicPtr, AtomicUint};
 	use std::sync::atomics::{SeqCst};
 	use std::cast::transmute;
 	use std::io::timer::sleep;
 
 	#[test]
-	fn test_KV_prime_swapping() {
+	fn test_value_prime_swapping() {
 		unsafe {
-			let kv: *mut KV<int> = transmute(~KV::new(10));
-			let atomickv = AtomicPtr::new(kv);
-			let kvprime = (*kv).prime();
-			assert!(!(*atomickv.load(SeqCst)).is_prime());
-			atomickv.swap(kvprime, SeqCst);
-			assert!((*atomickv.load(SeqCst))._kv==(*kv)._kv);
-			assert!((*atomickv.load(SeqCst)).is_prime());
+			let value: *mut Value<int> = transmute(~Value::new(10));
+			let atomicvalue = AtomicPtr::new(value);
+			let valueprime = (*value).prime();
+			assert!(!(*atomicvalue.load(SeqCst)).is_prime());
+			atomicvalue.swap(valueprime, SeqCst);
+			assert!((*atomicvalue.load(SeqCst))._value==(*value)._value);
+			assert!((*atomicvalue.load(SeqCst)).is_prime());
 		}
 	}
 
@@ -494,8 +557,17 @@ mod test {
 		unsafe {
 			let mut p: *mut int = transmute(~5) ;
 			{
-				let kv = KV::new(10);
-				p = kv.get_kv() ;
+				let kv = Key::new(10);
+				p = kv.get_key() ;
+				assert!((*p)==10);
+			}
+			assert!((*p)!=10);
+			assert!((*p)!=5);
+
+			let mut p: *mut int = transmute(~5) ;
+			{
+				let kv = Value::new(10);
+				p = kv.get_value() ;
 				assert!((*p)==10);
 			}
 			assert!((*p)!=10);
@@ -504,16 +576,24 @@ mod test {
 	}
 	
 	#[test]
-	fn test_KV_eq(){
+	fn test_vey_eq(){
+		assert!(Key::<int>::new_empty()==Key::<int>::new_empty());
+		assert!(Key::<int>::new_tombstone()==Key::<int>::new_tombstone());
+		assert!(Key::<int>::new(10)==Key::<int>::new(10));
+		assert!(Key::<int>::new(5)!=Key::<int>::new(10));
+	}
+
+	#[test]
+	fn test_value_eq(){
 		unsafe {
-			assert!(KV::<int>::new_empty()==KV::<int>::new_empty());
-			assert!(KV::<int>::new_tombstone()==KV::<int>::new_tombstone());
-			assert!((*KV::<int>::new_tombstone().prime())==(*KV::<int>::new_tombstone().prime()));
-			assert!(KV::<int>::new_tombprime()==(*KV::<int>::new_tombstone().prime()));
-			assert!(KV::<int>::new_tombprime()==KV::<int>::new_tombprime());
-			assert!(KV::<int>::new(10)==KV::<int>::new(10));
-			assert!(KV::<int>::new(5)!=KV::<int>::new(10));
-			assert!((*KV::<int>::new(10).prime())==(*KV::<int>::new(10).prime()));
+			assert!(Value::<int>::new_empty()==Value::<int>::new_empty());
+			assert!(Value::<int>::new_tombstone()==Value::<int>::new_tombstone());
+			assert!((*Value::<int>::new_tombstone().prime())==(*Value::<int>::new_tombstone().prime()));
+			assert!(Value::<int>::new_tombprime()==(*Value::<int>::new_tombstone().prime()));
+			assert!(Value::<int>::new_tombprime()==Value::<int>::new_tombprime());
+			assert!(Value::<int>::new(10)==Value::<int>::new(10));
+			assert!(Value::<int>::new(5)!=Value::<int>::new(10));
+			assert!((*Value::<int>::new(10).prime())==(*Value::<int>::new(10).prime()));
 		}
 	}
 
@@ -522,10 +602,10 @@ mod test {
 		let kvs = KVs::<int,int>::new(10);
 		unsafe {
 			for i in range(0,kvs._ks.len()) {
-				assert!((*kvs._ks[i].load(SeqCst)).kvtype()==Empty);
+				assert!((*kvs._ks[i].load(SeqCst)).keytype()==KeyEmpty);
 			}
 			for i in range(0,kvs._ks.len()) {
-				assert!((*kvs._vs[i].load(SeqCst)).kvtype()==TombStone);
+				assert!((*kvs._vs[i].load(SeqCst)).valuetype()==ValueTombStone);
 			}
 		}
 	}
@@ -552,12 +632,12 @@ mod test {
 		unsafe {
 			assert!((*(*kvs)._chm._newkvs.load(SeqCst)).len() == 16*4*4);
 		}
-		//let map2 = NonBlockingHashMap::<int,int>::new_with_size(10);
-		//sleep(2000);
-		//map2.resize(map2._kvs.load(SeqCst));
-		//unsafe {
-			//assert!((*(*map2._kvs.load(SeqCst))._chm._newkvs.load(SeqCst)).len() == 16*4);
-		//}
+		let map2 = NonBlockingHashMap::<int,int>::new_with_size(10);
+		sleep(2000);
+		map2.resize(map2._kvs.load(SeqCst));
+		unsafe {
+			assert!((*(*map2._kvs.load(SeqCst))._chm._newkvs.load(SeqCst)).len() == 16*4);
+		}
 	}
 }
 
