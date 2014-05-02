@@ -14,21 +14,12 @@ use std::cast::transmute;
 use std::container::Container;
 use time::{ Timespec, get_time };
 use std::sync::atomics::fence;
+use std::cmp::min;
 
 static REPROBE_LIMIT: uint = 10;  
 static MIN_SIZE_LOG: uint = 3;
 static MIN_SIZE: uint = 1<<MIN_SIZE_LOG;
 
-// ---Hash Function--------------------------------------------------------------------------------------
-fn hash<T: Hash<SipState>>(key: T) -> u64 {
-	let mut h = hash::hash(&key);	
-	h += (h << 15) ^ 0xffffcd7d;
-    h ^= h >> 10;
-    h += h << 3;
-    h ^= h >> 6;
-    h += h << 2 + h << 14;
-    return h ^ (h >> 16);
-}
 
 // ---Key-or-Value Slot Type--------------------------------------------------------------------------------
 #[deriving(Eq)]
@@ -44,7 +35,7 @@ struct KV<T> {
 	_is_prime: bool
 }
 
-impl<T> KV<T> {
+impl<T: Hash> KV<T> {
 	fn new(kv: T) -> KV<T> {
 		KV { _kvtype: KV, _kv: unsafe{ transmute(~kv) }, _is_prime: false }
 	}
@@ -65,6 +56,10 @@ impl<T> KV<T> {
 		KV { _kvtype: KV, _kv: unsafe{ transmute(~kv) }, _is_prime: true }
 	}
 
+	fn is_empty(&self) -> bool {
+		self._kvtype==Empty
+	}
+
 	fn is_prime(&self) -> bool {
 		self._is_prime	
 	}
@@ -75,12 +70,28 @@ impl<T> KV<T> {
 		}
 	}
 
+	fn unprime(&self) -> *mut KV<T>{
+		unsafe {
+			transmute(~KV { _kvtype: self._kvtype, _kv: self._kv, _is_prime: false })
+		}
+	}
+
 	fn kvtype(&self) -> KVTypes {
 		self._kvtype
 	}
 
 	fn get_kv(&self) -> *mut T {
 		self._kv
+	}
+	// ---Hash Function--------------------------------------------------------------------------------------
+	fn hash(&self) -> u64 {
+		let mut h = hash::hash(&self._kv);	
+		h += (h << 15) ^ 0xffffcd7d;
+		h ^= h >> 10;
+		h += h << 3;
+		h ^= h >> 6;
+		h += h << 2 + h << 14;
+		return h ^ (h >> 16);
 	}
 }
 
@@ -111,7 +122,7 @@ struct KVs<K,V> {
 	_hashes: ~[u64]
 }
 
-impl<K,V> KVs<K,V>{
+impl<K: Hash,V: Hash> KVs<K,V>{
 	fn new(table_size: uint) -> KVs<K,V>{
 		KVs {
 			_ks: {
@@ -176,12 +187,24 @@ struct CHM<K,V> {
 	_newkvs: AtomicPtr<KVs<K,V>>,
 	_size: AtomicUint,
 	_slots: AtomicUint,
+	_copy_done: AtomicUint,
+	_copy_idx: AtomicUint,
 	//_resizer: AtomicUint,
 }
 
 impl<K,V> CHM<K,V> {
 	fn new() -> CHM<K,V>{
-		CHM {_newkvs: AtomicPtr::new( unsafe {transmute(0)}), _size: AtomicUint::new(0), _slots: AtomicUint::new(0) }
+		CHM {
+			_newkvs: AtomicPtr::new( unsafe {transmute(0)}),
+			_size: AtomicUint::new(0), 
+			_slots: AtomicUint::new(0), 
+			_copy_done: AtomicUint::new(0),
+			_copy_idx: AtomicUint::new(0)
+		}
+	}
+
+	fn newkvs_nonatomic(&self) -> *mut KVs<K,V> {
+		self._newkvs.load(SeqCst)
 	}
 }
 
@@ -201,7 +224,7 @@ pub struct NonBlockingHashMap<K,V> {
 	_last_resize: Timespec, 
 }
 
-impl<K: Eq,V: Eq> NonBlockingHashMap<K,V> {
+impl<K: Eq + Hash,V: Eq + Hash> NonBlockingHashMap<K,V> {
 
 	pub fn new() -> NonBlockingHashMap<K,V> {
 		NonBlockingHashMap::new_with_size(MIN_SIZE)
@@ -213,8 +236,7 @@ impl<K: Eq,V: Eq> NonBlockingHashMap<K,V> {
 			initial_sz = 1024*1024;
 		}
 		let mut i = MIN_SIZE_LOG;
-		while 1<<i < initial_sz<<2 {
-			i += 1;
+		while 1<<i < initial_sz<<2 { i += 1;
 		}
 
 		NonBlockingHashMap {
@@ -253,13 +275,6 @@ impl<K: Eq,V: Eq> NonBlockingHashMap<K,V> {
 
 			let mut log2: uint = MIN_SIZE_LOG;
 			while 1<<log2 < newsz { log2 += 1 };
-
-			//let mut r = (*kvs)._chm._resizer.load(SeqCst);
-			//while (*kvs)._chm._resizer.compare_and_swap(r, r+1, SeqCst)>r {
-				//r = (*kvs)._chm._resizer.load(SeqCst);
-			//}
-
-			//let meg: uint = (1<<log2)<<1)*size_of(KV)  
 			
 			if (*kvs)._chm._newkvs.load(SeqCst) as int != 0 {
 				return (*kvs)._chm._newkvs.load(SeqCst);
@@ -272,7 +287,7 @@ impl<K: Eq,V: Eq> NonBlockingHashMap<K,V> {
 			}
 
 			let oldkvs = (*kvs)._chm._newkvs.load(SeqCst);
-			if (*kvs)._chm._newkvs.compare_and_swap(oldkvs, newkvs, SeqCst)==oldkvs {
+			if (*kvs)._chm._newkvs.compare_and_swap(oldkvs, newkvs, SeqCst)==oldkvs{
 				self.rehash();	
 			}
 			else {
@@ -283,28 +298,159 @@ impl<K: Eq,V: Eq> NonBlockingHashMap<K,V> {
 	}
 
 	#[allow(unused_variable)]
-	fn put_if_match(&self, kvs: *mut KVs<K,V>, key: KV<K>, putval: KV<V>, expval: Option<KV<V>>) -> KV<V> {
-		let k: V = unsafe {transmute(0)};
-		return KV::<V>::new(k);
-	}
-
-	#[allow(unused_variable)]
-	fn copy_slot(&self, idx: uint, oldkvs: *mut KVs<K,V>, newkvs: *mut KVs<K,V>){
+	fn put_if_match(&self, kvs: *mut KVs<K,V>, key: *mut KV<K>, putval: *mut KV<V>, expval: Option<KV<V>>) -> KV<V> {
 		unsafe {
-			let tombstone: *mut KV<K> = transmute(~KV::<K>::new_tombstone());
-			let empty = KV::<K>::new_empty();
-			let mut oldkey = (*oldkvs).key_nonatomic(idx);
-			while *oldkey == empty{
-				(*oldkvs)._ks[idx].compare_and_swap(oldkey, tombstone, SeqCst);
-				oldkey = (*oldkvs).key_nonatomic(idx);
+			assert!(!(*putval).is_empty());
+			assert!(!(*putval).is_prime());
+			match expval {
+				Some(val) => assert!(!val.is_empty()),
+				None => {}
 			}
+			
+			let fullhash = (*key).hash(); 
+			let len = (*kvs).len();
+			let idx = (fullhash & (len-1) as u64) as uint;
+			let reprobe_cnt: uint = 0;
+			let k = (*kvs).key_nonatomic(idx);
+			let v = (*kvs).value_nonatomic(idx);
 
-			let oldvalue = (*oldkvs).value_nonatomic(idx);
-			while !(*oldvalue).is_prime(){
-				
-			}
+			let k: V = transmute(0);
+			return KV::<V>::new(k);
+
 		}
 	}
+
+	fn help_copy(&mut self, newkvs: *mut KVs<K,V>) -> *mut KVs<K,V>{
+		unsafe {
+			if (*self._kvs.load(SeqCst))._chm._newkvs.load(SeqCst) as int == 0 {
+				return newkvs;
+			}
+			let thiskvs: *mut KVs<K,V> = self._kvs.load(SeqCst);
+			self.help_copy_impl(thiskvs, false);
+			return newkvs;
+		}
+
+	}
+
+	fn help_copy_impl(&mut self, oldkvs: *mut KVs<K,V>, copy_all: bool){
+		//volatile read here!!
+		unsafe {
+			assert!((*oldkvs)._chm.newkvs_nonatomic() as int != 0);
+			let oldlen: uint = (*oldkvs).len();
+			let min_copy_work = min(oldlen, 1024);
+			let mut panic_start = false;
+			let mut copy_idx = -1;
+
+			while (*oldkvs)._chm._copy_done.load(SeqCst) < oldlen {
+				if !panic_start{
+					copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
+					while copy_idx < oldlen<<1 && 
+						(*oldkvs)._chm._copy_idx.compare_and_swap(copy_idx, copy_idx + min_copy_work, SeqCst)!=copy_idx{
+						copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
+					}
+					if copy_idx >= oldlen<<1 {
+						panic_start = true;
+					}
+				}
+				let mut work_done = 0;
+				for i in range (0, min_copy_work){
+					if self.copy_slot( (copy_idx+i)&(oldlen-1), oldkvs ){
+						work_done += 1;
+					}
+				}
+				if work_done > 0 {
+					self.copy_check_and_promote(oldkvs, work_done);
+				}
+
+				copy_idx += min_copy_work;
+
+				if !copy_all&& !panic_start {
+					return;
+				}
+			}
+			self.copy_check_and_promote(oldkvs, 0);
+
+		}
+	}
+
+	fn copy_slot_and_check(&mut self, oldkvs: *mut KVs<K,V>, idx: uint, should_help: bool) -> *mut KVs<K,V>{
+		//volatile read here!!
+		unsafe {
+			assert!( (*oldkvs)._chm.newkvs_nonatomic() as int != 0 );
+			if self.copy_slot(idx, oldkvs) {
+				self.copy_check_and_promote(oldkvs, 1);
+			}
+
+			if should_help {
+				return self.help_copy((*oldkvs)._chm.newkvs_nonatomic());
+			}
+			else {
+				return (*oldkvs)._chm.newkvs_nonatomic();
+			}
+		}
+
+	}
+
+	fn copy_check_and_promote(&mut self, oldkvs: *mut KVs<K,V>, work_done: uint){
+		unsafe{
+			let oldlen = (*oldkvs).len();
+			let mut copy_done = (*oldkvs)._chm._copy_done.load(SeqCst);
+			assert!(copy_done + work_done <= oldlen);
+			if work_done > 0 {
+				while (*oldkvs)._chm._copy_done.compare_and_swap(copy_done, copy_done + work_done, SeqCst)!=copy_done {
+					copy_done = (*oldkvs)._chm._copy_done.load(SeqCst);
+				}
+				assert!(copy_done + work_done <= oldlen);
+			}
+
+			if copy_done + work_done == oldlen &&
+				self._kvs.load(SeqCst) == oldkvs &&
+				(self._kvs.compare_and_swap(oldkvs, ((*oldkvs)._chm.newkvs_nonatomic()), SeqCst)==oldkvs) {
+				self._last_resize = get_time();
+			}
+
+		}
+
+	}
+
+	fn copy_slot(&self, idx: uint, oldkvs: *mut KVs<K,V>) -> bool{
+		unsafe {
+			let mut key = (*oldkvs).key_nonatomic(idx);
+			let empty = KV::<K>::new_empty();
+			let tombstone_ptr: *mut KV<K> = transmute(~KV::<K>::new_tombstone());
+			while *key == empty{
+				(*oldkvs)._ks[idx].compare_and_swap(key, tombstone_ptr, SeqCst);
+				key = (*oldkvs).key_nonatomic(idx);
+			}
+
+			let mut oldvalue = (*oldkvs).value_nonatomic(idx);
+			while !(*oldvalue).is_prime(){
+				let primed = (*oldvalue).prime();	
+				if (*oldkvs)._vs[idx].compare_and_swap(oldvalue, primed, SeqCst)==oldvalue {
+					if (*oldvalue).kvtype()==TombStone { return true } 
+					oldvalue = primed;
+					break;
+				}
+				oldvalue = (*oldkvs).value_nonatomic(idx);
+			}
+			let tombprime = KV::<V>::new_tombprime();
+			if (*oldvalue) == tombprime { return false }	
+			
+			let old_unprimed = (*oldvalue).unprime();
+			assert!((*old_unprimed)!=tombprime);
+
+			let tombstone = KV::<V>::new_tombstone();
+			let newkvs = (*oldkvs)._chm.newkvs_nonatomic();
+			let copied_into_new: bool = self.put_if_match(newkvs, key, old_unprimed, Some(KV::<V>::new_tombstone()))==tombstone;
+			let tombprime_ptr: *mut KV<V> = transmute(~KV::<V>::new_tombprime());
+			while (*oldkvs)._vs[idx].compare_and_swap(oldvalue, tombprime_ptr, SeqCst)!=oldvalue{
+				oldvalue = (*oldkvs).value_nonatomic(idx);	
+			}
+			return copied_into_new;
+		}
+	}
+
+
 
 	fn rehash(&self){
 	}
