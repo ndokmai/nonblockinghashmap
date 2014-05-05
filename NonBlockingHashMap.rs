@@ -25,7 +25,7 @@ static MIN_SIZE: uint = 1<<MIN_SIZE_LOG;
 #[deriving(Eq)]
 enum MatchingTypes {
 	MatchAll,
-	MatchAllNotTombStone,
+	MatchAllNotEmpty,
 	MatchValue,
 	FromCopySlot
 }
@@ -512,7 +512,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 			loop {
 				assert!(!(*v).is_prime()); // If there is a Prime than this cannot be the newest table.
 				if matchingtype!=MatchAll && // If expval is not a wildcard
-					( matchingtype!=MatchAllNotTombStone || (*v).is_tombstone() || (*v).is_empty() ) // If expval is not a TombStone or Empty
+					( matchingtype!=MatchAllNotEmpty|| (*v).is_tombstone() || (*v).is_empty() ) // If expval is not a TombStone or Empty
 				{
 					assert!(!expval.is_none());
 					if v!=expval.unwrap() && // if v!= expval (pointer)
@@ -539,6 +539,56 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 				}
 			}
 		}
+	}
+
+	fn get<'a>(&'a mut self, key: K) -> Option<&'a V>{
+		unsafe {
+			let table = self.get_table_nonatomic();
+			let returnvalue = self.get_impl(table, transmute(~Key::<K>::new(key)));
+			if returnvalue.is_some() {
+				return Some(&'a *((*returnvalue.unwrap())._value));
+			}
+			else { return None; }
+		}
+	}
+
+	// Compute hash only once
+	fn get_impl(&mut self, kvs: *mut KVs<K,V>, key: *mut Key<K>) -> Option<*mut Value<V>> {
+		unsafe {self.get_impl_supply_hash(kvs, key, (*key).hash())}
+	}
+
+	fn get_impl_supply_hash(&mut self, kvs: *mut KVs<K,V>, key: *mut Key<K>, fullhash: u64) -> Option<*mut Value<V>> {
+		unsafe {
+			let len = (*kvs).len();
+			let mut idx = (fullhash & (len-1) as u64) as uint;
+			let mut reprobe_cnt: uint = 0;
+			loop {
+				let k = (*kvs).get_key_nonatomic_at(idx);
+				let v = (*kvs).get_value_nonatomic_at(idx);
+				if (*k).is_empty() { return None }
+				fence(SeqCst);
+				if (*k)==(*key) { 
+					if !(*v).is_prime() {
+						if (*v).is_tombstone() { return None }	
+						else { return Some(v) }
+					}
+					else {
+						let table = self.copy_slot_and_check(kvs, idx, true);
+						return self.get_impl_supply_hash(table, key, fullhash);
+					}
+				}
+				reprobe_cnt += 1;
+				if reprobe_cnt >= REPROBE_LIMIT || (*k).is_tombstone() {
+					if (*kvs)._chm.has_newkvs() {
+						self.help_copy();
+						return self.get_impl_supply_hash((*kvs)._chm.get_newkvs_nonatomic(), key, fullhash);
+					}
+					else { return None; }
+				}
+				idx = (idx+1) & (len-1);
+			}
+		}
+		
 	}
 
 	fn copy_slot_and_check(&mut self, oldkvs: *mut KVs<K,V>, idx: uint, should_help: bool) -> *mut KVs<K,V>{
@@ -577,9 +627,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 				(self._kvs.compare_and_swap(oldkvs, ((*oldkvs)._chm.get_newkvs_nonatomic()), SeqCst)==oldkvs) {
 				self._last_resize = get_time();
 			}
-
 		}
-
 	}
 
 	fn copy_slot(&mut self, idx: uint, oldkvs: *mut KVs<K,V>) -> bool{
@@ -815,12 +863,12 @@ fn main(){
 		let newmap = NonBlockingHashMap::<~str,~str>::new();
 		let shared_map = std::sync::arc::UnsafeArc::new(newmap);
 		let (noti_chan, noti_recv) = std::comm::channel();
-		let nthreads = 30;
+		let nthreads = 1;
 		for n in range(0, nthreads){
 			let child_map = shared_map.clone();
 			let noti_chan_clone = noti_chan.clone();
 			spawn( proc() {
-				for i in range(0, 1000){
+				for i in range(0, 100){
 					(*child_map.get()).put("key"+i.to_str(), n.to_str()+"_value"+i.to_str());
 				}
 				noti_chan_clone.send(());
@@ -830,8 +878,14 @@ fn main(){
 		for _ in range(0, nthreads){
 			noti_recv.recv();	
 		}
-		//std::io::timer::sleep(10000);
 		print_all(&(*shared_map.clone().get()));
+		let mut reader = std::io::stdio::stdin();
+		loop {
+			print!("Key: ");
+			let input: ~str = reader.read_line().unwrap().trim().to_owned();
+			println!("Value: {}", (*shared_map.get()).get(input));
+			
+		}
 		//newmap.help_copy();
 		//print_all(&newmap);
 
