@@ -1,6 +1,6 @@
 #![feature(default_type_params)]
-#![allow(dead_code)]
 #![feature(globs)]
+#![allow(dead_code)]
 #![allow(unused_imports)]
 
 extern crate time;
@@ -478,11 +478,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 					(*key).is_tombstone() // Enter state {KeyTombStone, Empty}; steal exucution path for optimization; let helper save the day.
 				{
 					let newkvs = self.resize(kvs); 
-					//// help copy
-					//if expval.is_some(){
-						//if !(*expval.unwrap()).is_empty() { self.help_copy(newkvs); } // Help only if this function is not called from copy_slot. (only copy_slot pass expval==Empty)
-					//}
-					//else { self.help_copy(newkvs); }
+					if expval_not_empty { self.help_copy(); }
 					return self.put_if_match_impl(newkvs, key, putval, matchingtype,  expval); // Put in the new table instead
 				} 
 				idx = (idx+1)&(len-1);
@@ -545,61 +541,6 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 		}
 	}
 
-
-
-	fn help_copy(&mut self, newkvs: *mut KVs<K,V>) -> *mut KVs<K,V>{
-		unsafe {
-			if (*self._kvs.load(SeqCst))._chm._newkvs.load(SeqCst) as int == 0 {
-				return newkvs;
-			}
-			let thiskvs: *mut KVs<K,V> = self._kvs.load(SeqCst);
-			self.help_copy_impl(thiskvs, false);
-			return newkvs;
-		}
-
-	}
-
-	fn help_copy_impl(&mut self, oldkvs: *mut KVs<K,V>, copy_all: bool){
-		//volatile read here!!
-		unsafe {
-			assert!((*oldkvs)._chm.get_newkvs_nonatomic() as int != 0);
-			let oldlen: uint = (*oldkvs).len();
-			let min_copy_work = min(oldlen, 1024);
-			let mut panic_start = false;
-			let mut copy_idx = -1;
-
-			while (*oldkvs)._chm._copy_done.load(SeqCst) < oldlen {
-				if !panic_start{
-					copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
-					while copy_idx < oldlen<<1 && 
-						(*oldkvs)._chm._copy_idx.compare_and_swap(copy_idx, copy_idx + min_copy_work, SeqCst)!=copy_idx{
-						copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
-					}
-					if copy_idx >= oldlen<<1 {
-						panic_start = true;
-					}
-				}
-				let mut work_done = 0;
-				for i in range (0, min_copy_work){
-					if self.copy_slot( (copy_idx+i)&(oldlen-1), oldkvs ){
-						work_done += 1;
-					}
-				}
-				if work_done > 0 {
-					self.copy_check_and_promote(oldkvs, work_done);
-				}
-
-				copy_idx += min_copy_work;
-
-				if !copy_all&& !panic_start {
-					return;
-				}
-			}
-			self.copy_check_and_promote(oldkvs, 0);
-
-		}
-	}
-
 	fn copy_slot_and_check(&mut self, oldkvs: *mut KVs<K,V>, idx: uint, should_help: bool) -> *mut KVs<K,V>{
 		//volatile read here!!
 		unsafe {
@@ -609,7 +550,8 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 			}
 
 			if should_help {
-				return self.help_copy((*oldkvs)._chm.get_newkvs_nonatomic());
+				self.help_copy();
+				return (*oldkvs)._chm.get_newkvs_nonatomic();
 			}
 			else {
 				return (*oldkvs)._chm.get_newkvs_nonatomic();
@@ -712,14 +654,75 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 			// ---------------------------------------------------------
 
 			return false; // State jump to {KeyTombStone, ValueTombPrime} for threads that lost the competition
-
-			//while (*oldkvs)._vs[idx].compare_and_swap(oldvalue, tombprime_ptr, SeqCst)==oldvalue{
-				//oldvalue = (*oldkvs).get_value_nonatomic_at(idx);	
-			//}
-			//return copied_into_new;
-			// ---------------------------------------------------------
 		}
 	}
+
+	fn help_copy(&mut self){
+		unsafe {
+			if (*self.get_table_nonatomic())._chm.has_newkvs(){
+				let kvs: *mut KVs<K,V> = self.get_table_nonatomic();
+				self.help_copy_impl(kvs, false);
+			}
+		}
+	}
+
+	fn help_copy_impl(&mut self, oldkvs: *mut KVs<K,V>, copy_all: bool){
+		//volatile read here!!
+		unsafe {
+			assert!((*oldkvs)._chm.has_newkvs());
+			let oldlen: uint = (*oldkvs).len();
+			let min_copy_work = min(oldlen, 1024);
+			let mut panic_start = false;
+			let mut copy_idx = -1;
+
+			while (*oldkvs)._chm._copy_done.load(SeqCst) < oldlen {
+				if !panic_start{
+					copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
+					while copy_idx < oldlen<<1 && 
+						(*oldkvs)._chm._copy_idx.compare_and_swap(copy_idx, copy_idx + min_copy_work, SeqCst)!=copy_idx{
+						copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
+					}
+					if copy_idx >= oldlen<<1 {
+						panic_start = true;
+					}
+				}
+				let mut work_done = 0;
+				for i in range (0, min_copy_work){
+					if self.copy_slot( (copy_idx+i)&(oldlen-1), oldkvs ){
+						work_done += 1;
+					}
+				}
+				if work_done > 0 {
+					self.copy_check_and_promote(oldkvs, work_done);
+				}
+
+				copy_idx += min_copy_work;
+
+				if !copy_all&& !panic_start {
+					return;
+				}
+			}
+			self.copy_check_and_promote(oldkvs, 0);
+
+		}
+	}
+
+
+	fn get_kvs_level(&self, level: uint) -> Option<*mut KVs<K,V>>{
+		NonBlockingHashMap::get_kvs_level_impl(self.get_table_nonatomic(), level)
+	}
+
+	fn get_kvs_level_impl(kvs: *mut KVs<K,V>, level: uint) -> Option<*mut KVs<K,V>>{
+		unsafe{
+			if kvs as int==0 { return None; }
+			if level==0 { 
+				return Some(kvs); 
+			}
+			else { return NonBlockingHashMap::get_kvs_level_impl((*kvs)._chm.get_newkvs_nonatomic(), level-1); }
+		}
+	}
+
+
 
 	fn fast_keyeq(k: *mut Key<K>, hashk: u64, key: *mut Key<K>, hashkey: u64) -> bool {
 		unsafe{
@@ -741,6 +744,94 @@ impl<K,V> Container for NonBlockingHashMap<K,V>{
 	fn len(&self) -> uint{
 		unsafe {(*self._kvs.load(SeqCst)).len()}
 	}	
+}
+
+// debuging functions
+fn print_table<K: Eq + Hash + Show,V: Eq + Show>(table: &NonBlockingHashMap<K,V>){
+	print_kvs(table.get_table_nonatomic());
+}
+fn print_all<K: Eq + Hash + Show,V: Eq + Show>(table: &NonBlockingHashMap<K,V>){
+	unsafe {
+		let mut kvs = table.get_table_nonatomic();
+		let mut i = 0;
+		while kvs as int != 0  {
+			println!("---Table {}---", i);
+			print_kvs(kvs);
+			i+=1;
+			kvs = (*kvs)._chm.get_newkvs_nonatomic();
+		}
+
+	}
+
+}
+fn print_kvs<K: Eq + Hash + Show,V: Eq + Show>(kvs: *mut KVs<K,V>){
+	unsafe{
+		for i in range(0, (*kvs).len()){
+			print!("{}: ({}, ", i, key_to_string((*kvs).get_key_nonatomic_at(i)));
+			print!("{}, ",value_to_string((*kvs).get_value_nonatomic_at(i)));
+			println!("{})",(*kvs)._hashes[i]);
+		}
+	}
+
+}
+
+
+fn key_to_string<K: Eq + Hash + Show>(key: *mut Key<K>) -> ~str{
+	unsafe {
+		match (*key).keytype() {
+			KeyTombStone => { ~"TOMBSTONE" }
+			KeyEmpty => { ~"EMPTY" }
+			Key => { 
+				assert!((*key)._key as int != 0);
+				(*(*key)._key).to_str()
+			}
+		}
+	}
+}
+
+fn value_to_string<V: Eq + Show>(value: *mut Value<V>) -> ~str{
+	unsafe {
+		match (*value).valuetype() {
+			ValueTombStone => {
+				if (*value).is_prime() { ~"TOMBPRIME" }
+				else { ~"TOMBSTONE" }
+			}
+			ValueEmpty => { ~"EMPTY" }
+			Value => { 
+				assert!((*value)._value as int != 0);
+				if (*value).is_prime() { "Prime("+(*(*value)._value).to_str()+")" }
+				else { (*(*value)._value).to_str() }
+			}
+		}
+	}
+}
+
+#[allow(unused_unsafe)]
+fn main(){
+	unsafe {
+		let mut newmap = NonBlockingHashMap::<~str,~str>::new();
+		//print_table(&newmap);
+		//newmap.resize(newmap.get_table_nonatomic());
+		//newmap.resize((*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic());
+		//println!("----Resized----");
+		//print_kvs((*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic());
+		//let empty: *mut Value<int> = transmute(~Value::<int>::new_empty());
+		//let key1: *mut Key<int> = transmute(~Key::<int>::new(120));
+		//let value1: *mut Value<int> = transmute(~Value::<int>::new(15));
+		//let table: *mut KVs<int,int> = newmap.get_table_nonatomic();
+
+		for i in range(0, 10){
+			newmap.put("key"+i.to_str(), "value"+i.to_str());
+			//println!("{} {}",i, newmap.get_kvs_level(1).is_some())
+		}
+		print_all(&newmap);
+
+		//newmap.help_copy();
+		//print_all(&newmap);
+
+		//newmap.help_copy();
+		//print_all(&newmap);
+	}
 }
 
 /****************************************************************************
@@ -857,89 +948,3 @@ mod test {
 	}
 }
 
-// debuging functions
-fn main(){
-	unsafe{
-		let mut newmap = NonBlockingHashMap::<int,int>::new();
-		//print_table(&newmap);
-		newmap.resize(newmap.get_table_nonatomic());
-		newmap.resize((*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic());
-		//println!("----Resized----");
-		//print_kvs((*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic());
-		//let empty: *mut Value<int> = transmute(~Value::<int>::new_empty());
-		//let key1: *mut Key<int> = transmute(~Key::<int>::new(120));
-		//let value1: *mut Value<int> = transmute(~Value::<int>::new(15));
-		//let table: *mut KVs<int,int> = newmap.get_table_nonatomic();
-		
-		newmap.put(123, 456);
-		newmap.put(123, 789);
-		println!("---Old Table---");
-		print_kvs(get_kvs_level(&newmap, 0));
-		println!("---Newer Table---");
-		print_kvs(get_kvs_level(&newmap, 1));
-		println!("---Newest Table---");
-		print_kvs(get_kvs_level(&newmap, 2));
-		//print_kvs((*(*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic()));
-	}
-}
-
-fn print_table<K: Eq + Hash + Show,V: Eq + Show>(table: &NonBlockingHashMap<K,V>){
-	print_kvs(table.get_table_nonatomic());
-}
-fn print_kvs<K: Eq + Hash + Show,V: Eq + Show>(kvs: *mut KVs<K,V>){
-	unsafe{
-		for i in range(0, (*kvs).len()){
-			print!("{}: ({}, ", i, key_to_string((*kvs).get_key_nonatomic_at(i)));
-			print!("{}, ",value_to_string((*kvs).get_value_nonatomic_at(i)));
-			println!("{})",(*kvs)._hashes[i]);
-		}
-	}
-
-}
-
-fn get_kvs_level<K: Eq + Hash + Show,V: Eq + Show>(table: &NonBlockingHashMap<K,V>, level: uint) -> *mut KVs<K,V>{
-	get_kvs_level_impl(table.get_table_nonatomic(), level)
-}
-
-fn get_kvs_level_impl<K: Eq + Hash + Show,V: Eq + Show>(kvs: *mut KVs<K,V>, level: uint) -> *mut KVs<K,V>{
-	unsafe{
-		if level==0 { return kvs; }
-		let newlevel = level-1;
-		let current_kvs = (*kvs)._chm.get_newkvs_nonatomic();
-		if newlevel==0 {
-			return current_kvs;
-		}
-		else { return get_kvs_level_impl(current_kvs, newlevel); }
-	}
-}
-
-
-fn key_to_string<K: Eq + Hash + Show>(key: *mut Key<K>) -> ~str{
-	unsafe {
-		match (*key).keytype() {
-			KeyTombStone => { ~"TOMBSTONE" }
-			KeyEmpty => { ~"EMPTY" }
-			Key => { 
-				assert!((*key)._key as int != 0);
-				(*(*key)._key).to_str()
-			}
-		}
-	}
-}
-
-fn value_to_string<V: Eq + Show>(value: *mut Value<V>) -> ~str{
-	unsafe {
-		match (*value).valuetype() {
-			ValueTombStone => {
-				if (*value).is_prime() { ~"TOMBPRIME" }
-				else { ~"TOMBSTONE" }
-			}
-			ValueEmpty => { ~"EMPTY" }
-			Value => { 
-				assert!((*value)._value as int != 0);
-				if (*value).is_prime() { "Prime("+(*(*value)._value).to_str()+")" }
-				else { (*(*value)._value).to_str() }
-			}
-		}
-	}
-}
