@@ -362,7 +362,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 
 	fn resize(&self, kvs: *mut KVs<K,V>) -> *mut KVs<K,V> {
 		unsafe {
-			//	volatile read here	
+			fence(SeqCst);
 			if (*kvs)._chm.has_newkvs() {
 				return (*kvs)._chm._newkvs.load(SeqCst);
 			}
@@ -468,7 +468,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 					v = (*kvs).get_value_nonatomic_at(idx);
 					assert!(!(*k).is_empty());
 				} 
-				//volatile read here!!
+				fence(SeqCst);
 				if k==key || (*k)==(*key)  {
 					break;		
 				}
@@ -542,7 +542,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 	}
 
 	fn copy_slot_and_check(&mut self, oldkvs: *mut KVs<K,V>, idx: uint, should_help: bool) -> *mut KVs<K,V>{
-		//volatile read here!!
+		fence(SeqCst);
 		unsafe {
 			assert!( (*oldkvs)._chm.get_newkvs_nonatomic() as int != 0 );
 			if self.copy_slot(idx, oldkvs) {
@@ -658,16 +658,16 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 	}
 
 	fn help_copy(&mut self){
-		unsafe {
-			if (*self.get_table_nonatomic())._chm.has_newkvs(){
-				let kvs: *mut KVs<K,V> = self.get_table_nonatomic();
-				self.help_copy_impl(kvs, false);
-			}
-		}
+   //     unsafe {
+			//if (*self.get_table_nonatomic())._chm.has_newkvs(){
+				//let kvs: *mut KVs<K,V> = self.get_table_nonatomic();
+				//self.help_copy_impl(kvs, false);
+			//}
+		//}
 	}
 
 	fn help_copy_impl(&mut self, oldkvs: *mut KVs<K,V>, copy_all: bool){
-		//volatile read here!!
+		fence(SeqCst);
 		unsafe {
 			assert!((*oldkvs)._chm.has_newkvs());
 			let oldlen: uint = (*oldkvs).len();
@@ -686,15 +686,18 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 						panic_start = true;
 					}
 				}
-				let mut work_done = 0;
 				for i in range (0, min_copy_work){
-					if self.copy_slot( (copy_idx+i)&(oldlen-1), oldkvs ){
-						work_done += 1;
-					}
+					self.copy_slot_and_check( oldkvs, (copy_idx+i)&(oldlen-1), false );
 				}
-				if work_done > 0 {
-					self.copy_check_and_promote(oldkvs, work_done);
-				}
+				//let mut work_done = 0;
+				//for i in range (0, min_copy_work){
+					//if self.copy_slot( (copy_idx+i)&(oldlen-1), oldkvs ){
+						//work_done += 1;
+					//}
+				//}
+				//if work_done > 0 {
+					//self.copy_check_and_promote(oldkvs, work_done);
+				//}
 
 				copy_idx += min_copy_work;
 
@@ -702,7 +705,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 					return;
 				}
 			}
-			self.copy_check_and_promote(oldkvs, 0);
+			//self.copy_check_and_promote(oldkvs, 0);
 
 		}
 	}
@@ -809,23 +812,26 @@ fn value_to_string<V: Eq + Show>(value: *mut Value<V>) -> ~str{
 #[allow(unused_unsafe)]
 fn main(){
 	unsafe {
-		let mut newmap = NonBlockingHashMap::<~str,~str>::new();
-		//print_table(&newmap);
-		//newmap.resize(newmap.get_table_nonatomic());
-		//newmap.resize((*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic());
-		//println!("----Resized----");
-		//print_kvs((*newmap.get_table_nonatomic())._chm.get_newkvs_nonatomic());
-		//let empty: *mut Value<int> = transmute(~Value::<int>::new_empty());
-		//let key1: *mut Key<int> = transmute(~Key::<int>::new(120));
-		//let value1: *mut Value<int> = transmute(~Value::<int>::new(15));
-		//let table: *mut KVs<int,int> = newmap.get_table_nonatomic();
+		let newmap = NonBlockingHashMap::<~str,~str>::new();
+		let shared_map = std::sync::arc::UnsafeArc::new(newmap);
+		let (noti_chan, noti_recv) = std::comm::channel();
+		let nthreads = 30;
+		for n in range(0, nthreads){
+			let child_map = shared_map.clone();
+			let noti_chan_clone = noti_chan.clone();
+			spawn( proc() {
+				for i in range(0, 1000){
+					(*child_map.get()).put("key"+i.to_str(), n.to_str()+"_value"+i.to_str());
+				}
+				noti_chan_clone.send(());
+			} );
 
-		for i in range(0, 10){
-			newmap.put("key"+i.to_str(), "value"+i.to_str());
-			//println!("{} {}",i, newmap.get_kvs_level(1).is_some())
 		}
-		print_all(&newmap);
-
+		for _ in range(0, nthreads){
+			noti_recv.recv();	
+		}
+		//std::io::timer::sleep(10000);
+		print_all(&(*shared_map.clone().get()));
 		//newmap.help_copy();
 		//print_all(&newmap);
 
