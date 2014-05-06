@@ -27,7 +27,7 @@ To compile the library:
 
 To run a test in the `main()` function:
 ```
-# rustc main.rc -L . && ./main
+# rustc main.rs -L . && ./main
 ```
 
 
