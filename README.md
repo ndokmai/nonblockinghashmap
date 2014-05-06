@@ -21,13 +21,13 @@ As for now, the `put_if_match` and `copy_check_and_promote` function work fine w
 ## Setup & Run
 
 To compile the library: 
-```
-# rustc --crate-type=lib nonblockinghashmap.rs
+```bash
+$ rustc --crate-type=lib nonblockinghashmap.rs
 ```
 
 To run a test in the `main()` function:
-```
-# rustc main.rs -L . && ./main
+```bash
+$ rustc main.rs -L . && ./main
 ```
 
 
