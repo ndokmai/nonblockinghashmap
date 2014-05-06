@@ -20,7 +20,7 @@ As for now, the `put_if_match` and `copy_check_and_promote` function work fine w
 
 ## Setup & Run
 
-To compile the library: 
+To compile the library using `rustc 0.11-pre-nightly`: 
 ```bash
 $ rustc --crate-type=lib nonblockinghashmap.rs
 ```
