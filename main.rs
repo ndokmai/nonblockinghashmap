@@ -1,13 +1,8 @@
 extern crate time;
 extern crate nonblockinghashmap;
 extern crate rand;
-use	nonblockinghashmap::{NonBlockingHashMap, print_all};
-//mod nonblockinghashmap;
-//mod kvtable;
-//mod keyvalue;
+use	nonblockinghashmap::{NonBlockingHashMap};
 
-#[allow(unused_unsafe)]
-#[allow(unused_variable)]
 fn main(){
 	let newmap = NonBlockingHashMap::<~str,~str>::new();
 	let shared_map = std::sync::arc::UnsafeArc::new(newmap);
@@ -22,8 +17,6 @@ fn main(){
 			let child_map_get = shared_map.clone();
 			let noti_chan_clone_put = noti_chan.clone();
 			let noti_chan_clone_get = noti_chan.clone();
-
-
 			spawn( proc() {
 				for i in range(0, put){
 					(*child_map_put.get()).put("key"+i.to_str(),"value"+i.to_str()+"_t"+n.to_str());
