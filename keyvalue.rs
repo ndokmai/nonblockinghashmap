@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::hash;
 use std::hash::Hash;
 use std::hash::sip::SipState;

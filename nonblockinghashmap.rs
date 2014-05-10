@@ -42,7 +42,7 @@ pub struct NonBlockingHashMap<K,V> {
 	_last_resize: Timespec, 
 }
 
-impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
+impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 
 	pub fn new() -> NonBlockingHashMap<K,V> {
 		NonBlockingHashMap::new_with_size(MIN_SIZE)
@@ -144,6 +144,8 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 
 	pub fn put_if_match_impl(&mut self, kvs: *mut KVs<K,V>, key: *mut Key<K>, putval: *mut Value<V>, matchingtype: MatchingTypes, expval: Option<*mut Value<V>>) -> *mut Value<V> {
 		unsafe {
+			//let mut debugval = 0 as *mut Value<V>; 
+			//if expval.is_some() { debugval = expval.unwrap() }
 			assert!(!(*putval).is_empty()); // Never put a ValueEmpty type
 			assert!(!(*putval).is_prime()); // Never put a Prime type
 			assert!(matchingtype!=MatchValue || !expval.is_none()); // If matchingtype==MatchValue then expval must contain something 
@@ -220,12 +222,13 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 			loop {
 				assert!(!(*v).is_prime()); // If there is a Prime than this cannot be the newest table.
 				if matchingtype!=MatchAll && // If expval is not a wildcard
-					( matchingtype!=MatchAllNotEmpty|| (*v).is_tombstone() || (*v).is_empty() ) // If expval is not a TombStone or Empty
+					!( matchingtype==MatchAllNotEmpty && !(*v).is_tombstone() && !(*v).is_empty() ) // If expval is not a TombStone or Empty
 					{
 						assert!(!expval.is_none());
+						assert!(matchingtype==MatchValue);
 						if v!=expval.unwrap() && // if v!= expval (pointer)
 							!((*v).is_empty() && (*expval.unwrap()).is_tombstone()) && // If we expect a TombStone and v is empty, it should be a match.
-								((*expval.unwrap()).is_empty() || (*expval.unwrap())!=(*v)) // expval==Empty or *expval==*v
+								 *expval.unwrap()!=*v // expval==Empty or *expval==*v
 								{
 									return v; // do nothing, just return the old value.
 								}
@@ -303,7 +306,7 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 		fence(SeqCst);
 		unsafe {
 			assert!( (*oldkvs)._chm.get_newkvs_nonatomic() as int != 0 );
-			if self.copy_slot(idx, oldkvs) {
+			if self.copy_slot(oldkvs, idx) {
 				self.copy_check_and_promote(oldkvs, 1);
 			}
 
@@ -333,12 +336,14 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 			if copy_done + work_done == oldlen &&
 				self._kvs.load(SeqCst) == oldkvs &&
 					(self._kvs.compare_and_swap(oldkvs, ((*oldkvs)._chm.get_newkvs_nonatomic()), SeqCst)==oldkvs) {
+						//println!("---obsolete---")
+						//print_kvs(oldkvs);
 						self._last_resize = get_time();
 					}
 		}
 	}
 
-	pub fn copy_slot(&mut self, idx: uint, oldkvs: *mut KVs<K,V>) -> bool{
+	pub fn copy_slot(&mut self, oldkvs: *mut KVs<K,V>, idx: uint) -> bool{
 		unsafe {
 
 			let mut key = (*oldkvs).get_key_nonatomic_at(idx);
@@ -412,14 +417,16 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 			return false; // State jump to {KeyTombStone, ValueTombPrime} for threads that lost the competition
 		}
 	}
+   // pub fn help_copy(&mut self){
+	//}
 
 	pub fn help_copy(&mut self){
-		//     unsafe {
-		//if (*self.get_table_nonatomic())._chm.has_newkvs(){
-		//let kvs: *mut KVs<K,V> = self.get_table_nonatomic();
-		//self.help_copy_impl(kvs, false);
-		//}
-		//}
+		unsafe {
+			if (*self.get_table_nonatomic())._chm.has_newkvs(){
+				let kvs: *mut KVs<K,V> = self.get_table_nonatomic();
+				self.help_copy_impl(kvs, false);
+			}
+		}
 	}
 
 	pub fn help_copy_impl(&mut self, oldkvs: *mut KVs<K,V>, copy_all: bool){
@@ -443,7 +450,9 @@ impl<K: Eq + Hash,V: Eq> NonBlockingHashMap<K,V> {
 					}
 				}
 				for i in range (0, min_copy_work){
-					self.copy_slot_and_check( oldkvs, (copy_idx+i)&(oldlen-1), false );
+					if (*oldkvs)._chm.has_newkvs() {
+						self.copy_slot_and_check(oldkvs, (copy_idx+i)&(oldlen-1), false) ;
+					}
 				}
 				//let mut work_done = 0;
 				//for i in range (0, min_copy_work){
@@ -564,6 +573,15 @@ pub fn value_to_string<V: Eq + Show>(value: *mut Value<V>) -> ~str{
 		}
 	}
 }
+
+//fn main(){
+	//let put = 60;
+	//let mut newmap = NonBlockingHashMap::<~str,~str>::new();
+	//for i in range(0, put){
+		//newmap.put("key"+i.to_str(),"value"+i.to_str().to_str());
+		//print_all(&newmap);
+	//}
+//}
 
 
 /****************************************************************************

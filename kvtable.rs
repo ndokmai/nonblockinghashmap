@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::sync::atomics::{AtomicPtr, AtomicUint};
 use std::cast::transmute;
 use std::hash::Hash;
