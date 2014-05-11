@@ -9,7 +9,8 @@ use std::hash;
 use std::hash::Hash;
 use std::hash::sip::SipState;
 use std::sync::atomics::{AtomicOption, AtomicPtr, AtomicUint};
-use std::sync::atomics::{SeqCst};
+use std::sync::atomics::Ordering;
+use std::sync::atomics::{SeqCst, Relaxed};
 use std::cast::transmute;
 use std::container::Container;
 use time::{ Timespec, get_time };
@@ -17,6 +18,7 @@ use std::sync::atomics::fence;
 use std::cmp::min;
 use std::to_str::ToStr;
 use std::fmt::Show;
+use std::container::MutableMap;
 
 use keyvalue::{Key, Value, KeyTombStone, ValueTombStone, KeyType, ValueType, KeyEmpty, ValueEmpty};
 use kvtable::{KVs, REPROBE_LIMIT};
@@ -26,6 +28,8 @@ mod kvtable;
 
 static MIN_SIZE_LOG: uint = 3;
 static MIN_SIZE: uint = 1<<MIN_SIZE_LOG;
+
+static MEMORY_ORDERING: Ordering = SeqCst;
 
 #[deriving(Eq)]
 enum MatchingTypes {
@@ -65,18 +69,18 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 	}
 
 	pub fn get_table_nonatomic(&self) -> *mut KVs<K,V>{
-		self._kvs.load(SeqCst)	
+		self._kvs.load(MEMORY_ORDERING)	
 	}
 
 	pub fn resize(&self, kvs: *mut KVs<K,V>) -> *mut KVs<K,V> {
 		unsafe {
-			fence(SeqCst);
+			//fence(MEMORY_ORDERING);
 			if (*kvs)._chm.has_newkvs() {
-				return (*kvs)._chm._newkvs.load(SeqCst);
+				return (*kvs)._chm._newkvs.load(MEMORY_ORDERING);
 			}
 
 			let oldlen: uint = (*kvs).len();
-			let sz = (*kvs)._chm._size.load(SeqCst);
+			let sz = (*kvs)._chm._size.load(MEMORY_ORDERING);
 			let mut newsz = sz;
 
 			if sz >= oldlen>>2 {
@@ -87,7 +91,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 			}
 
 			let tm = get_time();
-			if newsz <= oldlen && tm.sec <= self._last_resize.sec + 1 && (*kvs)._chm._slots.load(SeqCst) >= sz<<1 {
+			if newsz <= oldlen && tm.sec <= self._last_resize.sec + 1 && (*kvs)._chm._slots.load(MEMORY_ORDERING) >= sz<<1 {
 				newsz = oldlen<<1;			
 			}
 
@@ -99,22 +103,22 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 			while 1<<log2 < newsz { log2 += 1 };
 
 			if (*kvs)._chm.has_newkvs() {
-				return (*kvs)._chm._newkvs.load(SeqCst);
+				return (*kvs)._chm._newkvs.load(MEMORY_ORDERING);
 			}
 
 			let mut newkvs: *mut KVs<K,V> = transmute(~KVs::<K,V>::new(1<<log2));
 
 			if (*kvs)._chm.has_newkvs() {
-				return (*kvs)._chm._newkvs.load(SeqCst);
+				return (*kvs)._chm._newkvs.load(MEMORY_ORDERING);
 			}
 
-			let oldkvs = (*kvs)._chm._newkvs.load(SeqCst);
-			if (*kvs)._chm._newkvs.compare_and_swap(oldkvs, newkvs, SeqCst)==oldkvs{
+			let oldkvs = (*kvs)._chm._newkvs.load(MEMORY_ORDERING);
+			if (*kvs)._chm._newkvs.compare_and_swap(oldkvs, newkvs, MEMORY_ORDERING)==oldkvs{
 				(*kvs)._chm._has_newkvs = true;
 				self.rehash();
 			}
 			else {
-				newkvs = (*kvs)._chm._newkvs.load(SeqCst);
+				newkvs = (*kvs)._chm._newkvs.load(MEMORY_ORDERING);
 			}
 			return newkvs;
 		}
@@ -169,8 +173,8 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 			loop {
 				if (*k).is_empty() { // Found an available key slot
 					if (*putval).is_tombstone() { return putval; } // Never change KeyEmpty to KeyTombStone 
-					if (*kvs)._ks[idx].compare_and_swap(k, key, SeqCst)==k{ // Add key to the slot
-						(*kvs)._chm._slots.fetch_add(1, SeqCst);	// Add 1 to the number of used slots
+					if (*kvs)._ks[idx].compare_and_swap(k, key, MEMORY_ORDERING)==k{ // Add key to the slot
+						(*kvs)._chm._slots.fetch_add(1, MEMORY_ORDERING);	// Add 1 to the number of used slots
 						(*kvs)._hashes[idx] = fullhash;
 						break;
 					}
@@ -178,7 +182,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 					v = (*kvs).get_value_nonatomic_at(idx);
 					assert!(!(*k).is_empty());
 				} 
-				fence(SeqCst);
+				//fence(MEMORY_ORDERING);
 				if k==key || (*k)==(*key)  {
 					break;		
 				}
@@ -235,10 +239,10 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 					}
 
 				// Finally, add some values.
-				if (*kvs)._vs[idx].compare_and_swap(v, putval, SeqCst)==v {
+				if (*kvs)._vs[idx].compare_and_swap(v, putval, MEMORY_ORDERING)==v {
 					if expval_not_empty {
-						if ((*v).is_empty() || (*v).is_tombstone()) && !(*putval).is_tombstone() { (*kvs)._chm._size.fetch_add(1, SeqCst); }
-						if !((*v).is_empty() || (*v).is_tombstone()) && (*putval).is_tombstone() { (*kvs)._chm._size.fetch_sub(1, SeqCst); }
+						if ((*v).is_empty() || (*v).is_tombstone()) && !(*putval).is_tombstone() { (*kvs)._chm._size.fetch_add(1, MEMORY_ORDERING); }
+						if !((*v).is_empty() || (*v).is_tombstone()) && (*putval).is_tombstone() { (*kvs)._chm._size.fetch_sub(1, MEMORY_ORDERING); }
 					}
 					if (*v).is_empty() && expval_not_empty { return transmute(~Value::<V>::new_tombstone()) }
 					else { return v; }
@@ -277,7 +281,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 				let k = (*kvs).get_key_nonatomic_at(idx);
 				let v = (*kvs).get_value_nonatomic_at(idx);
 				if (*k).is_empty() { return None }
-				fence(SeqCst);
+				//fence(MEMORY_ORDERING);
 				if (*k)==(*key) { 
 					if !(*v).is_prime() {
 						if (*v).is_tombstone() { return None }	
@@ -303,7 +307,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 	}
 
 	pub fn copy_slot_and_check(&mut self, oldkvs: *mut KVs<K,V>, idx: uint, should_help: bool) -> *mut KVs<K,V>{
-		fence(SeqCst);
+		//fence(MEMORY_ORDERING);
 		unsafe {
 			assert!( (*oldkvs)._chm.get_newkvs_nonatomic() as int != 0 );
 			if self.copy_slot(oldkvs, idx) {
@@ -324,18 +328,18 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 	pub fn copy_check_and_promote(&mut self, oldkvs: *mut KVs<K,V>, work_done: uint){
 		unsafe{
 			let oldlen = (*oldkvs).len();
-			let mut copy_done = (*oldkvs)._chm._copy_done.load(SeqCst);
+			let mut copy_done = (*oldkvs)._chm._copy_done.load(MEMORY_ORDERING);
 			assert!(copy_done + work_done <= oldlen);
 			if work_done > 0 {
-				while (*oldkvs)._chm._copy_done.compare_and_swap(copy_done, copy_done + work_done, SeqCst)!=copy_done {
-					copy_done = (*oldkvs)._chm._copy_done.load(SeqCst);
+				while (*oldkvs)._chm._copy_done.compare_and_swap(copy_done, copy_done + work_done, MEMORY_ORDERING)!=copy_done {
+					copy_done = (*oldkvs)._chm._copy_done.load(MEMORY_ORDERING);
 				}
 				assert!(copy_done + work_done <= oldlen);
 			}
 
 			if copy_done + work_done == oldlen &&
-				self._kvs.load(SeqCst) == oldkvs &&
-					(self._kvs.compare_and_swap(oldkvs, ((*oldkvs)._chm.get_newkvs_nonatomic()), SeqCst)==oldkvs) {
+				self._kvs.load(MEMORY_ORDERING) == oldkvs &&
+					(self._kvs.compare_and_swap(oldkvs, ((*oldkvs)._chm.get_newkvs_nonatomic()), MEMORY_ORDERING)==oldkvs) {
 						//println!("---obsolete---")
 						//print_kvs(oldkvs);
 						self._last_resize = get_time();
@@ -352,7 +356,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 			// ---------------------------------------------------------
 			let tombstone_ptr: *mut Key<K> = transmute(~Key::<K>::new_tombstone());
 			while (*key).is_empty() {
-				if (*oldkvs)._ks[idx].compare_and_swap(key, tombstone_ptr, SeqCst)==key{ // Attempt {Empty, Empty} -> {KeyTombStone, Empty}
+				if (*oldkvs)._ks[idx].compare_and_swap(key, tombstone_ptr, MEMORY_ORDERING)==key{ // Attempt {Empty, Empty} -> {KeyTombStone, Empty}
 					return true;
 				}
 				key = (*oldkvs).get_key_nonatomic_at(idx);
@@ -375,7 +379,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 					if (*oldvalue).is_empty() { tombstone_ptr }
 					else { (*oldvalue).get_prime() } 
 				};
-				if (*oldkvs)._vs[idx].compare_and_swap(oldvalue, primed, SeqCst)==oldvalue {
+				if (*oldkvs)._vs[idx].compare_and_swap(oldvalue, primed, MEMORY_ORDERING)==oldvalue {
 					if (*primed).valuetype()==ValueTombStone { return true; } // Transition: {Key, Empty} -> {Key, ValueTombPrime} or {Key, ValueTombStone} -> {Key, ValueTombPrime}
 					else { // Transition: {Key, Value} -> {Key, Value'}
 						oldvalue = primed; 
@@ -407,7 +411,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 			// Enter state: {Key, Value.get_prime()} (intermediate)
 			oldvalue = (*oldkvs).get_value_nonatomic_at(idx); // Check again, just in case...
 			while !(*oldvalue).is_tombprime() {
-				if 	(*oldkvs)._vs[idx].compare_and_swap(oldvalue, tombprime_ptr, SeqCst)==oldvalue {
+				if 	(*oldkvs)._vs[idx].compare_and_swap(oldvalue, tombprime_ptr, MEMORY_ORDERING)==oldvalue {
 					return true;
 				}
 				oldvalue = (*oldkvs).get_value_nonatomic_at(idx);	
@@ -430,7 +434,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 	}
 
 	pub fn help_copy_impl(&mut self, oldkvs: *mut KVs<K,V>, copy_all: bool){
-		fence(SeqCst);
+		//fence(MEMORY_ORDERING);
 		unsafe {
 			assert!((*oldkvs)._chm.has_newkvs());
 			let oldlen: uint = (*oldkvs).len();
@@ -438,31 +442,31 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 			let mut panic_start = false;
 			let mut copy_idx = -1;
 
-			while (*oldkvs)._chm._copy_done.load(SeqCst) < oldlen {
+			while (*oldkvs)._chm._copy_done.load(MEMORY_ORDERING) < oldlen {
 				if !panic_start{
-					copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
+					copy_idx = (*oldkvs)._chm._copy_idx.load(MEMORY_ORDERING);
 					while copy_idx < oldlen<<1 && 
-						(*oldkvs)._chm._copy_idx.compare_and_swap(copy_idx, copy_idx + min_copy_work, SeqCst)!=copy_idx{
-							copy_idx = (*oldkvs)._chm._copy_idx.load(SeqCst);
+						(*oldkvs)._chm._copy_idx.compare_and_swap(copy_idx, copy_idx + min_copy_work, MEMORY_ORDERING)!=copy_idx{
+							copy_idx = (*oldkvs)._chm._copy_idx.load(MEMORY_ORDERING);
 						}
 					if copy_idx >= oldlen<<1 {
 						panic_start = true;
 					}
 				}
+				//for i in range (0, min_copy_work){
+					//if (*oldkvs)._chm.has_newkvs() {
+						//self.copy_slot_and_check(oldkvs, (copy_idx+i)&(oldlen-1), false) ;
+					//}
+				//}
+				let mut work_done = 0;
 				for i in range (0, min_copy_work){
-					if (*oldkvs)._chm.has_newkvs() {
-						self.copy_slot_and_check(oldkvs, (copy_idx+i)&(oldlen-1), false) ;
+					if self.copy_slot(oldkvs, (copy_idx+i)&(oldlen-1)){
+						work_done += 1;
 					}
 				}
-				//let mut work_done = 0;
-				//for i in range (0, min_copy_work){
-				//if self.copy_slot( (copy_idx+i)&(oldlen-1), oldkvs ){
-				//work_done += 1;
-				//}
-				//}
-				//if work_done > 0 {
-				//self.copy_check_and_promote(oldkvs, work_done);
-				//}
+				if work_done > 0 {
+					self.copy_check_and_promote(oldkvs, work_done);
+				}
 
 				copy_idx += min_copy_work;
 
@@ -470,7 +474,7 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 					return;
 				}
 			}
-			//self.copy_check_and_promote(oldkvs, 0);
+			self.copy_check_and_promote(oldkvs, 0);
 
 		}
 	}
@@ -510,9 +514,10 @@ impl<K: Eq + Hash +Show,V: Eq + Show> NonBlockingHashMap<K,V> {
 
 impl<K,V> Container for NonBlockingHashMap<K,V>{
 	fn len(&self) -> uint{
-		unsafe {(*self._kvs.load(SeqCst)).len()}
+		unsafe {(*self._kvs.load(MEMORY_ORDERING)).len()}
 	}	
 }
+
 
 // debuging functions
 pub fn print_table<K: Eq + Hash + Show,V: Eq + Show>(table: &NonBlockingHashMap<K,V>){
@@ -574,14 +579,14 @@ pub fn value_to_string<V: Eq + Show>(value: *mut Value<V>) -> ~str{
 	}
 }
 
-//fn main(){
-	//let put = 60;
-	//let mut newmap = NonBlockingHashMap::<~str,~str>::new();
-	//for i in range(0, put){
-		//newmap.put("key"+i.to_str(),"value"+i.to_str().to_str());
-		//print_all(&newmap);
-	//}
-//}
+fn main(){
+	let put = 60;
+	let mut newmap = NonBlockingHashMap::<~str,~str>::new();
+	for i in range(0, put){
+		newmap.put("key"+i.to_str(),"value"+i.to_str().to_str());
+		print_all(&newmap);
+	}
+}
 
 
 /****************************************************************************

@@ -21,6 +21,11 @@ impl<T: Hash> Key<T> {
 		Key { _keytype: KeyType, _key: unsafe{ transmute(~k) } }
 	}
 
+	//pub fn new_pointer(k: *T) -> Key<T> {
+		//Key { _keytype: KeyType, _key: k }
+	//}
+	
+
 	pub fn new_empty() -> Key<T> {
 		Key { _keytype: KeyEmpty, _key: unsafe{ transmute(0) } }
 	}
