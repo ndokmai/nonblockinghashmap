@@ -1,4 +1,4 @@
-Highly Scalable No-blocking Hash Map in Rust
+Highly Scalable Non-blocking Hash Map in Rust
 --------
 
 The design of this hash map is taken and modified from [Dr. Cliff Click's design], [originally implemented in Java]. The hash map is thread-safe, thus can be safely used as a shared resource among multiple threads, without requiring mutual exclusion, and typesafe, because it is implemented in Rust. It is also scalable and can be shared among a large number of threads without experincing a major bottleneck. The work is currently under development.
@@ -20,7 +20,7 @@ As for now, the `put_if_match` and `copy_check_and_promote` function work fine w
 
 ## Setup & Run
 
-To compile the library using `rustc 0.11-pre-nightly`: 
+To compile the library using `rustc 0.10`: 
 ```bash
 $ rustc --crate-type=lib nonblockinghashmap.rs
 ```
